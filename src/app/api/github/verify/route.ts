@@ -1,95 +1,87 @@
 import { NextResponse } from "next/server";
 import { verifyTool } from "@/lib/genlayer";
 
-export const maxDuration = 360;
+export const maxDuration = 300;
 
-type GitHubVerificationRequest = {
-  repository?: unknown;
-  commitSha?: unknown;
-  claimedPurpose?: unknown;
-  declaredCapabilities?: unknown;
-};
-
-type Receipt = {
-  verdict: string;
-  risk_level: string;
-  purpose_alignment: string;
-  evidence_quality: string;
-  summary: string;
-};
-
-function isRepository(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)
-  );
-}
-
-function isCommitSha(value: unknown): value is string {
-  return typeof value === "string" && /^[a-fA-F0-9]{7,64}$/.test(value);
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function isReceipt(value: unknown): value is Receipt {
-  if (!value || typeof value !== "object") return false;
-
-  const receipt = value as Record<string, unknown>;
-
-  return [
-    "verdict",
-    "risk_level",
-    "purpose_alignment",
-    "evidence_quality",
-    "summary",
-  ].every(
-    (field) =>
-      typeof receipt[field] === "string" && receipt[field].trim().length > 0,
-  );
-}
-
-export async function POST(request: Request) {
+export async function POST(req: Request) {
   try {
-    const body = (await request.json()) as GitHubVerificationRequest;
+    const body = await req.json();
 
-    if (!isRepository(body.repository) || !isCommitSha(body.commitSha)) {
+    const {
+      repository,
+      commitSha,
+      claimedPurpose,
+      declaredCapabilities,
+    } = body ?? {};
+
+    if (typeof repository !== "string" || !repository.trim()) {
       return NextResponse.json(
-        { error: "repository must be owner/repo and commitSha must be a Git SHA." },
+        { error: "Repository is required." },
+        { status: 400 },
+      );
+    }
+
+    if (typeof commitSha !== "string" || !commitSha.trim()) {
+      return NextResponse.json(
+        { error: "Commit SHA is required." },
         { status: 400 },
       );
     }
 
     if (
-      !isNonEmptyString(body.claimedPurpose) ||
-      !isNonEmptyString(body.declaredCapabilities)
+      typeof claimedPurpose !== "string" ||
+      !claimedPurpose.trim()
     ) {
       return NextResponse.json(
-        { error: "claimedPurpose and declaredCapabilities are required." },
+        { error: "Claimed purpose is required." },
+        { status: 400 },
+      );
+    }
+
+    if (
+      typeof declaredCapabilities !== "string" ||
+      !declaredCapabilities.trim()
+    ) {
+      return NextResponse.json(
+        { error: "Declared capabilities are required." },
+        { status: 400 },
+      );
+    }
+
+    const githubUrlPattern =
+      /^https:\/\/github\.com\/[^/]+\/[^/]+\/?$/;
+
+    if (!githubUrlPattern.test(repository.trim())) {
+      return NextResponse.json(
+        {
+          error:
+            "Repository must be a valid GitHub repository URL.",
+        },
         { status: 400 },
       );
     }
 
     const verification = await verifyTool(
-      `https://github.com/${body.repository}`,
-      body.claimedPurpose.trim(),
-      body.declaredCapabilities.trim(),
+      repository.trim(),
+      claimedPurpose.trim(),
+      declaredCapabilities.trim(),
     );
 
-    if (!isReceipt(verification.receipt)) {
-      throw new Error("GenLayer returned an invalid trust receipt");
-    }
+    const receipt =
+      verification.receipt as Record<string, unknown>;
 
     return NextResponse.json({
       success: true,
+      repository: repository.trim(),
+      commitSha: commitSha.trim(),
       txHash: verification.txHash,
       receiptId: verification.receiptId,
-      verdict: verification.receipt.verdict,
-      riskLevel: verification.receipt.risk_level,
-      purposeAlignment: verification.receipt.purpose_alignment,
-      evidenceQuality: verification.receipt.evidence_quality,
-      summary: verification.receipt.summary,
+      verdict: receipt.verdict,
+      risk_level: receipt.risk_level,
+      purpose_alignment: receipt.purpose_alignment,
+      evidence_quality: receipt.evidence_quality,
+      reason_codes: receipt.reason_codes,
+      summary: receipt.summary,
     });
   } catch (error) {
     console.error("GitHub verification error:", error);
@@ -97,7 +89,9 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error ? error.message : "GitHub verification failed",
+          error instanceof Error
+            ? error.message
+            : "GitHub verification failed.",
       },
       { status: 500 },
     );
