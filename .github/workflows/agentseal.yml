@@ -1,0 +1,138 @@
+name: AgentSeal
+
+on:
+  workflow_dispatch:
+    inputs:
+      claimedPurpose:
+        description: The repository's claimed purpose
+        required: false
+        default: AI tool verification
+        type: string
+      declaredCapabilities:
+        description: The repository's declared capabilities
+        required: false
+        default: Declared capabilities from repository
+        type: string
+  push:
+    branches:
+      - main
+
+permissions:
+  checks: write
+  contents: read
+
+jobs:
+  verify:
+    name: AgentSeal verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Start AgentSeal check
+        id: start_check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const check = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: "AgentSeal",
+              head_sha: context.sha,
+              status: "in_progress",
+              output: {
+                title: "AgentSeal verification in progress",
+                summary: "Waiting for the AgentSeal GenLayer consensus decision.",
+              },
+            });
+            core.setOutput("check_run_id", check.data.id);
+
+      - name: Verify with AgentSeal
+        id: verify
+        env:
+          AGENTSEAL_API_URL: ${{ secrets.AGENTSEAL_API_URL }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          CLAIMED_PURPOSE: ${{ inputs.claimedPurpose || 'AI tool verification' }}
+          DECLARED_CAPABILITIES: ${{ inputs.declaredCapabilities || 'Declared capabilities from repository' }}
+        run: |
+          set -euo pipefail
+          test -n "$AGENTSEAL_API_URL"
+
+          payload="$(jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg commitSha "$COMMIT_SHA" \
+            --arg claimedPurpose "$CLAIMED_PURPOSE" \
+            --arg declaredCapabilities "$DECLARED_CAPABILITIES" \
+            '{repository: $repository, commitSha: $commitSha, claimedPurpose: $claimedPurpose, declaredCapabilities: $declaredCapabilities}')"
+
+          response="$(curl --fail-with-body --max-time 420 --retry 2 --retry-all-errors \
+            --request POST "${AGENTSEAL_API_URL%/}/api/github/verify" \
+            --header "Content-Type: application/json" \
+            --data "$payload")"
+
+          echo "$response" | jq -e '
+            .success == true and
+            (.txHash | type == "string") and
+            (.receiptId | type == "number") and
+            (.verdict | type == "string") and
+            (.riskLevel | type == "string") and
+            (.purposeAlignment | type == "string") and
+            (.evidenceQuality | type == "string") and
+            (.summary | type == "string")
+          ' > /dev/null
+
+          echo "result=$(echo "$response" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish AgentSeal check
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          VERIFICATION_OUTCOME: ${{ steps.verify.outcome }}
+          VERIFICATION_RESULT: ${{ steps.verify.outputs.result }}
+          AGENTSEAL_API_URL: ${{ secrets.AGENTSEAL_API_URL }}
+        with:
+          script: |
+            const checkRunId = Number("${{ steps.start_check.outputs.check_run_id }}");
+            const detailsUrl = process.env.AGENTSEAL_API_URL?.replace(/\/$/, "");
+            let conclusion = "failure";
+            let output = {
+              title: "AgentSeal verification failed",
+              summary: "AgentSeal could not obtain a GenLayer trust receipt for this commit.",
+            };
+            let externalId;
+
+            if (process.env.VERIFICATION_OUTCOME === "success") {
+              const result = JSON.parse(process.env.VERIFICATION_RESULT);
+              const verdict = result.verdict.toUpperCase();
+
+              conclusion =
+                verdict === "SEALED"
+                  ? "success"
+                  : verdict === "REVIEW"
+                    ? "neutral"
+                    : verdict === "BLOCK" || verdict === "BLOCKED"
+                      ? "failure"
+                      : "action_required";
+              externalId = String(result.receiptId);
+              output = {
+                title: verdict === "SEALED" ? "AgentSeal ✓ SEALED" : `AgentSeal ${result.verdict}`,
+                summary: [
+                  `Risk: ${result.riskLevel}`,
+                  `Purpose: ${result.purposeAlignment}`,
+                  `Evidence: ${result.evidenceQuality}`,
+                  `GenLayer Receipt #${String(result.receiptId).padStart(4, "0")}`,
+                  `Transaction: ${result.txHash}`,
+                ].join("\n"),
+                text: result.summary,
+              };
+            }
+
+            await github.rest.checks.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              check_run_id: checkRunId,
+              status: "completed",
+              conclusion,
+              external_id: externalId,
+              ...(detailsUrl ? { details_url: detailsUrl } : {}),
+              output,
+            });
