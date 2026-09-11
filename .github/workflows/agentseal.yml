@@ -26,6 +26,7 @@ jobs:
     name: AgentSeal verification
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     steps:
       - name: Start AgentSeal check
         id: start_check
@@ -43,6 +44,7 @@ jobs:
                 summary: "Waiting for the AgentSeal GenLayer consensus decision.",
               },
             });
+
             core.setOutput("check_run_id", check.data.id);
 
       - name: Verify with AgentSeal
@@ -53,18 +55,30 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           CLAIMED_PURPOSE: ${{ inputs.claimedPurpose || 'AI tool verification' }}
           DECLARED_CAPABILITIES: ${{ inputs.declaredCapabilities || 'Declared capabilities from repository' }}
+
         run: |
           set -euo pipefail
+
           test -n "$AGENTSEAL_API_URL"
 
+          repository_url="https://github.com/${REPOSITORY}"
+
           payload="$(jq -n \
-            --arg repository "$REPOSITORY" \
+            --arg repository "$repository_url" \
             --arg commitSha "$COMMIT_SHA" \
             --arg claimedPurpose "$CLAIMED_PURPOSE" \
             --arg declaredCapabilities "$DECLARED_CAPABILITIES" \
-            '{repository: $repository, commitSha: $commitSha, claimedPurpose: $claimedPurpose, declaredCapabilities: $declaredCapabilities}')"
+            '{
+              repository: $repository,
+              commitSha: $commitSha,
+              claimedPurpose: $claimedPurpose,
+              declaredCapabilities: $declaredCapabilities
+            }')"
 
-          response="$(curl --fail-with-body --max-time 420 --retry 2 --retry-all-errors \
+          echo "Verifying: $repository_url"
+          echo "Commit: $COMMIT_SHA"
+
+          response="$(curl --fail-with-body --max-time 300 --retry 2 --retry-all-errors \
             --request POST "${AGENTSEAL_API_URL%/}/api/github/verify" \
             --header "Content-Type: application/json" \
             --data "$payload")"
@@ -74,9 +88,9 @@ jobs:
             (.txHash | type == "string") and
             (.receiptId | type == "number") and
             (.verdict | type == "string") and
-            (.riskLevel | type == "string") and
-            (.purposeAlignment | type == "string") and
-            (.evidenceQuality | type == "string") and
+            (.risk_level | type == "string") and
+            (.purpose_alignment | type == "string") and
+            (.evidence_quality | type == "string") and
             (.summary | type == "string")
           ' > /dev/null
 
@@ -89,15 +103,19 @@ jobs:
           VERIFICATION_OUTCOME: ${{ steps.verify.outcome }}
           VERIFICATION_RESULT: ${{ steps.verify.outputs.result }}
           AGENTSEAL_API_URL: ${{ secrets.AGENTSEAL_API_URL }}
+
         with:
           script: |
             const checkRunId = Number("${{ steps.start_check.outputs.check_run_id }}");
             const detailsUrl = process.env.AGENTSEAL_API_URL?.replace(/\/$/, "");
+
             let conclusion = "failure";
+
             let output = {
               title: "AgentSeal verification failed",
               summary: "AgentSeal could not obtain a GenLayer trust receipt for this commit.",
             };
+
             let externalId;
 
             if (process.env.VERIFICATION_OUTCOME === "success") {
@@ -112,16 +130,23 @@ jobs:
                     : verdict === "BLOCK" || verdict === "BLOCKED"
                       ? "failure"
                       : "action_required";
+
               externalId = String(result.receiptId);
+
               output = {
-                title: verdict === "SEALED" ? "AgentSeal ✓ SEALED" : `AgentSeal ${result.verdict}`,
+                title:
+                  verdict === "SEALED"
+                    ? "AgentSeal ✓ SEALED"
+                    : `AgentSeal ${result.verdict}`,
+
                 summary: [
-                  `Risk: ${result.riskLevel}`,
-                  `Purpose: ${result.purposeAlignment}`,
-                  `Evidence: ${result.evidenceQuality}`,
+                  `Risk: ${result.risk_level}`,
+                  `Purpose: ${result.purpose_alignment}`,
+                  `Evidence: ${result.evidence_quality}`,
                   `GenLayer Receipt #${String(result.receiptId).padStart(4, "0")}`,
                   `Transaction: ${result.txHash}`,
                 ].join("\n"),
+
                 text: result.summary,
               };
             }
