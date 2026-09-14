@@ -25,6 +25,7 @@ function getClient() {
 
   return createClient({
     chain: studioDevnet,
+    endpoint: "https://studio-next.genlayer.com/api",
     account: createAccount(privateKey as `0x${string}`),
   });
 }
